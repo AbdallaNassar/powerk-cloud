@@ -1,0 +1,25 @@
+# Repository-root build context. Keep credentials and runtime data out of it.
+**/.git
+**/.venv
+**/venv
+**/tests
+**/__pycache__
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/*.py[cod]
+**/*.egg-info
+**/.env
+**/*.pem
+**/*.key
+**/*.secret
+**/*.token
+**/*.log
+**/powerk.json*
+**/powerk.db*
+android
+deploy/backups
+deploy/certs
+deploy/secrets
+deploy/apk
+.aws

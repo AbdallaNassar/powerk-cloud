@@ -1,0 +1,107 @@
+name: powerk
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  powerk:
+    build:
+      context: ..
+      dockerfile: server/Dockerfile
+    image: powerk-server:0.1.0
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 300m
+    stop_grace_period: 30s
+    environment:
+      POWERK_TOKEN: ${POWERK_TOKEN:-}
+      POWERK_MAC: ${POWERK_MAC:-}
+      POWERK_ARGS: --trusted-proxy 172.30.86.0/24 ${POWERK_ARGS:-}
+      POWERK_IP: ${POWERK_IP:-}
+      POWERK_FCM_SERVICE_ACCOUNT: ${POWERK_FCM_SERVICE_ACCOUNT:-}
+      TZ: Africa/Cairo
+    volumes:
+      - powerk-data:/data
+      - ./secrets:/secrets:ro
+      # Android app served at /powerk.apk (put the release build at deploy/apk/powerk.apk; POWERK_ARGS has --apk /apk/powerk.apk).
+      - ./apk:/apk:ro
+    ports:
+      - "10086:10086"
+    networks:
+      backend:
+        ipv4_address: 172.30.86.2
+      egress:
+    logging: *logging
+
+  caddy:
+    # Review/update exact image tags with security releases.
+    image: caddy:2.11.7-alpine
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 128m
+    environment:
+      POWERK_DOMAIN: ${POWERK_DOMAIN:?set POWERK_DOMAIN in .env}
+    ports:
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./cloudflare-ips.caddy:/etc/caddy/cloudflare-ips.caddy:ro
+      - ./certs:/certs:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks: [backend, egress]
+    # Both services also share egress; pin upstream resolution to the trusted backend.
+    extra_hosts:
+      - "powerk:172.30.86.2"
+    logging: *logging
+
+  backup:
+    # Reuses the application's base layers; stdlib only, no SQLite CLI install.
+    image: python:3.12.15-slim-bookworm
+    user: "10001:10001"
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 96m
+    network_mode: none
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+      TZ: Africa/Cairo
+    entrypoint: [python, /scripts/backup.py]
+    command: [schedule]
+    volumes:
+      # SQLite may need to create WAL shared-memory files even for a read-only connection.
+      - powerk-data:/data
+      - ./backups:/backups
+      - ./scripts:/scripts:ro
+    logging: *logging
+
+networks:
+  backend:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.30.86.0/24
+  # Outbound notifications need Internet access; no HTTP host port is published.
+  egress:
+
+volumes:
+  powerk-data:
+  caddy-data:
+  caddy-config:

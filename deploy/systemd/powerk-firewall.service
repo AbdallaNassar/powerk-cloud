@@ -1,0 +1,15 @@
+[Unit]
+Description=Cloudflare-only HTTPS rules for powerk Docker ports
+Requires=docker.service
+After=network-online.target netfilter-persistent.service docker.service
+Wants=network-online.target
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash /opt/powerk/deploy/scripts/firewall.sh
+ExecReload=/bin/bash /opt/powerk/deploy/scripts/firewall.sh
+
+[Install]
+WantedBy=docker.service

@@ -1,0 +1,41 @@
+{
+    # Owner-provided Origin CA certificate; no ACME, redirects or origin port 80.
+    auto_https off
+    servers {
+        protocols h1 h2
+        import /etc/caddy/cloudflare-ips.caddy
+        trusted_proxies_strict
+        client_ip_headers CF-Connecting-IP
+    }
+}
+
+{$POWERK_DOMAIN}:443 {
+    tls /certs/origin.pem /certs/origin.key {
+        protocols tls1.2 tls1.3
+        client_auth {
+            mode require_and_verify
+            trust_pool file {
+                pem_file /certs/cloudflare-origin-pull-ca.pem
+            }
+        }
+    }
+    request_body {
+        max_size 64KB
+    }
+    encode zstd gzip
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options nosniff
+        Referrer-Policy no-referrer
+        X-Frame-Options DENY
+        Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+        -Server
+    }
+    reverse_proxy powerk:8080 {
+        header_up X-Real-IP {client_ip}
+    }
+    log {
+        output stdout
+        format json
+    }
+}
