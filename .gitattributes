@@ -1,0 +1,7 @@
+# Keep exact bytes: the web page and tests compare content byte for byte, and scripts run on Linux.
+server/** text eol=lf
+tools/** text eol=lf
+*.woff2 binary
+*.png binary
+deploy/** text eol=lf
+server/Dockerfile text eol=lf

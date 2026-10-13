@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang=en dir=ltr data-theme=kraft>
+<meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name=color-scheme content="light dark">
+<meta name=theme-color id=themeColor content="#c9a46e">
+<title>powerk</title>
+<link rel=icon href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='1' y='1' width='14' height='14' rx='4' fill='%23f7e33b' stroke='%2317130f'/%3E%3Cpath d='M8 4v4M5.5 5.5a3.5 3.5 0 1 0 5 0' stroke='%2317130f' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel=stylesheet href=/app.css>
+<body>
+<header class=top>
+  <span class=brand><i><svg class=i viewBox="0 0 24 24" aria-hidden=true><path d="M12 4v7M7.4 7.2a7 7 0 1 0 9.2 0"/></svg></i>powerk</span>
+  <button class=chip id=langBtn data-action="toggle-language"></button>
+  <button class="btn plain" id=logoutBtn hidden data-action="logout"></button>
+</header>
+<nav id=nav></nav>
+<main id=app></main>
+<div class=toast id=toast role=status aria-live=polite></div>
+<dialog id=dlg><form method=dialog id=dlgForm data-action="dialog"></form></dialog>
+<script src=/app.js defer></script>

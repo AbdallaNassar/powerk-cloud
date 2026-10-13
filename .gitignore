@@ -16,7 +16,10 @@ android/.gradle/
 android/.kotlin/
 android/build/
 android/app/build/
+android/baselineprofile/build/
 android/local.properties
+android/keystore.properties
+android/app/google-services.json
 android/.idea/
 android/*.iml
 android/captures/
@@ -38,3 +41,17 @@ desktop.ini
 powerk.json
 powerk.json.tmp
 powerk.db
+
+# ---- packaged Python server ----
+server/.venv/
+.pytest_cache/
+*.egg-info/
+.pytest-tmp/
+
+# ---- production deployment ----
+/deploy/.env
+/deploy/certs/*.pem
+/deploy/certs/*.key
+/deploy/backups/
+/deploy/apk/
+/deploy/secrets/
