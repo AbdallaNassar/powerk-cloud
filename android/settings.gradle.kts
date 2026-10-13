@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "powerk"
 include(":app")
+include(":baselineprofile")

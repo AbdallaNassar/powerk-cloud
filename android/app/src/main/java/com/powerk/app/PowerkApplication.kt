@@ -10,9 +10,11 @@ class PowerkApplication : Application() {
         super.onCreate()
         Server.init(this)
         Lang.init(this)
+        PushDevices.init(this)
     }
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
+        PushNotifications.createChannels(this)
         WidgetUpdates.appearanceChanged(this)
     }
 }

@@ -6,6 +6,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.key
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
@@ -47,7 +49,8 @@ data class ToggleOutcome(val snapshot: Snapshot, val confirmed: Boolean)
 internal suspend fun toggleFresh(target: OutletTarget, fetch: suspend () -> Snapshot,
     send: suspend (String, Int, Boolean) -> Boolean): ToggleOutcome {
     val fresh = fetch()
-    val (strip, outlet) = fresh.resolve(target) ?: throw ServerException("", messageRes = R.string.outlet_unavailable)
+    val (strip, outlet) = fresh.resolve(target) ?: throw ServerException("", 404, R.string.no_access)
+    if (!strip.role.canControl) throw ServerException("", 403, R.string.no_access)
     if (!strip.online) throw ServerException("", 503, R.string.state_offline)
     val confirmed = send(target.mac, target.n, !outlet.on)
     return ToggleOutcome(fetch(), confirmed)
@@ -57,22 +60,21 @@ object OutletControl {
     // Prevent overlapping taps from undoing a just-issued command in this process.
     private val commandLock = Mutex()
     suspend fun fresh(): Snapshot {
-        if (!Server.configured) throw ServerException("", messageRes = R.string.no_server_title)
+        if (!Server.configured) throw ServerException("", 401, R.string.auth_sign_in_again)
         val connection = Server.connection
-        return connectionResult(connection, { Server.connection }) { Api.snapshot(it.base, it.token) }
+        return connectionResult(connection, { Server.connection }) { Api.snapshot(it) }
             ?: throw ServerException("", messageRes = R.string.connection_changed)
     }
-    suspend fun toggle(target: OutletTarget): ToggleOutcome? {
+    suspend fun toggle(target: OutletTarget, connection: ServerConnection = Server.connection): ToggleOutcome? {
         if (!commandLock.tryLock()) return null
         try {
-            // Capture connection settings for the whole operation if Settings changes concurrently.
-            val connection = Server.connection
+            if (!connection.isCurrent(Server.connection)) throw ServerException("", messageRes = R.string.connection_changed)
             return toggleFresh(target, {
-                connectionResult(connection, { Server.connection }) { Api.snapshot(it.base, it.token) }
+                connectionResult(connection, { Server.connection }) { Api.snapshot(it) }
                     ?: throw ServerException("", messageRes = R.string.connection_changed)
             }) { mac, n, on ->
                 if (!connection.isCurrent(Server.connection)) throw ServerException("", messageRes = R.string.connection_changed)
-                Api.setOutlet(connection.base, connection.token, mac, n, on)
+                Api.setOutlet(connection, mac, n, on)
             }
         } finally { commandLock.unlock() }
     }
@@ -81,10 +83,11 @@ object OutletControl {
 @Composable
 fun TargetList(strips: List<Strip>, onChoose: (OutletTarget) -> Unit) {
     val context = LocalContext.current
+    val controllable = remember(strips) { strips.filter { it.role.canControl } }
     Column(Modifier.fillMaxWidth().heightIn(max = 480.dp).verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        if (strips.isEmpty()) Text(stringResource(R.string.no_strip_title))
-        strips.forEach { strip ->
+        if (controllable.isEmpty()) Text(stringResource(R.string.no_controllable_strips))
+        controllable.forEach { strip -> key(strip.mac) {
             Text(markerText(strip.displayName), style = MaterialTheme.typography.titleMedium)
             Text(strip.mac, style = LocalPowerkType.current.figures)
             strip.outlets.sortedBy { it.n }.filter { it.n in 1..4 }.forEach { outlet ->
@@ -92,6 +95,6 @@ fun TargetList(strips: List<Strip>, onChoose: (OutletTarget) -> Unit) {
                     Text(stringResource(R.string.outlet_choice, outlet.n, outlet.displayName(context)))
                 }
             }
-        }
+        } }
     }
 }

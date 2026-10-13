@@ -58,8 +58,6 @@ import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.TopAppBar
 import androidx.activity.compose.BackHandler
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.repeatOnLifecycle
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularWavyProgressIndicator
@@ -82,14 +80,19 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.structuralEqualityPolicy
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -110,6 +113,11 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.toggleableState
+import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -117,7 +125,9 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.ui.unit.sp
@@ -125,40 +135,40 @@ import androidx.compose.ui.unit.sp
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PowerkApp(initialTab: Int = 0, navigationRequest: Int = 0) {
+    // Destroy every screen/editor/snackbar immediately on an account or server change.
+    // Refresh-token rotation intentionally leaves this identity unchanged.
+    val connection = Server.connection
+    key(connection) {
+        if (connection.authorized) ConnectedApp(initialTab, navigationRequest) else SignInScreen()
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ConnectedApp(initialTab: Int, navigationRequest: Int) {
     var tab by remember { mutableIntStateOf(initialTab) }
-    var snapshot by remember { mutableStateOf<Snapshot?>(null) }
-    var snapshotConnection by remember { mutableStateOf<ServerConnection?>(null) }
-    val shownSnapshot = snapshot.takeIf { snapshotConnection == Server.connection }
-    var error by remember { mutableStateOf<String?>(null) }
-    var loading by remember { mutableStateOf(false) }
+    val feed = LiveFeed.client.state.collectAsState()
+    // Narrow reads: strip changes do not invalidate the scaffold or unrelated tabs.
+    val shownSnapshot by remember {
+        derivedStateOf(structuralEqualityPolicy()) { feed.value.snapshot.takeIf { feed.value.connection == Server.connection } }
+    }
+    val unreadAlerts by remember { derivedStateOf(structuralEqualityPolicy()) { shownSnapshot?.unreadAlerts ?: 0 } }
+    val loading by remember { derivedStateOf { feed.value.loading } }
     var showSplash by remember { mutableStateOf(true) }
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val resources = LocalResources.current
-    val lifecycle = (context.findActivity() as androidx.lifecycle.LifecycleOwner).lifecycle
+    val error by remember(resources) { derivedStateOf { feed.value.error?.let { uiError(resources, it) } } }
     var settingsOpen by remember { mutableStateOf(false) }
     LaunchedEffect(initialTab, navigationRequest) { tab = initialTab; settingsOpen = false }
     BackHandler(settingsOpen) { settingsOpen = false }
     // "mac:outlet" -> state we are switching to right now (optimistic UI while the strip answers)
     val pending = remember { mutableStateMapOf<String, Boolean>() }
 
-    suspend fun refresh() {
-        if (!Server.configured) return
-        val connection = Server.connection
-        loading = true
-        try {
-            val result = connectionResult(connection, { Server.connection }) { Api.snapshot(it.base, it.token) }
-            if (result != null) {
-                snapshot = result; snapshotConnection = connection; error = null
-                WidgetUpdates.freshSnapshot(context, result, connection)
-            }
-        } catch (e: Exception) {
-            if (e is kotlinx.coroutines.CancellationException) throw e
-            if (connection.isCurrent(Server.connection)) error = uiError(resources, e)
-        } finally {
-            if (connection.isCurrent(Server.connection)) loading = false
-        }
+    // Only a refresh the user asked for shows the loading state; background polls stay silent so nothing jumps or spins.
+    suspend fun refresh(userInitiated: Boolean = false) {
+        withContext(Dispatchers.IO) { LiveFeed.client.refresh(Server.connection, userInitiated) }
     }
 
     LaunchedEffect(Unit) {
@@ -167,16 +177,8 @@ fun PowerkApp(initialTab: Int = 0, navigationRequest: Int = 0) {
     }
 
     LaunchedEffect(Server.connection) {
-        snapshot = null // Never display a different server's last good data.
-        WidgetUpdates.renderAll(context)
-        error = null
+        withContext(Dispatchers.IO) { WidgetUpdates.renderAll(context) }
         pending.clear()
-        lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
-            while (true) {
-                refresh()
-                delay(2000)
-            }
-        }
     }
 
     fun command(mac: String, outlet: Int, on: Boolean) {
@@ -186,7 +188,7 @@ fun PowerkApp(initialTab: Int = 0, navigationRequest: Int = 0) {
         keys.forEach { pending[it] = on }
         scope.launch {
             try {
-                val confirmed = Api.setOutlet(connection.base, connection.token, mac, outlet, on)
+                val confirmed = Api.setOutlet(connection, mac, outlet, on)
                 if (connection.isCurrent(Server.connection)) {
                     refresh()
                     if (!confirmed) snackbar.showSnackbar(resources.getString(R.string.not_confirmed))
@@ -226,13 +228,13 @@ fun PowerkApp(initialTab: Int = 0, navigationRequest: Int = 0) {
                 Column {
                 DashedDivider()
                 ShortNavigationBar(containerColor = LocalPowerkColors.current.bar) {
-                    val labels = listOf(R.string.tab_plugs, R.string.tab_rules, R.string.tab_energy, R.string.tab_alerts)
-                    val icons = listOf(Icons.Filled.Home, Icons.Filled.DateRange, Icons.Filled.Star, Icons.Filled.Notifications)
+                    val labels = remember { listOf(R.string.tab_plugs, R.string.tab_rules, R.string.tab_energy, R.string.tab_alerts) }
+                    val icons = remember { listOf(Icons.Filled.Home, Icons.Filled.DateRange, Icons.Filled.Star, Icons.Filled.Notifications) }
                     labels.forEachIndexed { index, label ->
                         ShortNavigationBarItem(selected = tab == index, onClick = { tab = index },
                             icon = {
                                 BadgedBox(badge = {
-                                    if (index == 3 && (shownSnapshot?.unreadAlerts ?: 0) > 0) Badge { Text(shownSnapshot!!.unreadAlerts.toString()) }
+                                    if (index == 3 && unreadAlerts > 0) Badge { Text(unreadAlerts.toString()) }
                                 }) { Icon(icons[index], contentDescription = null) }
                             }, label = { Text(stringResource(label)) })
                     }
@@ -258,7 +260,7 @@ fun PowerkApp(initialTab: Int = 0, navigationRequest: Int = 0) {
                         error = error,
                         loading = loading,
                         pending = pending,
-                        onRefresh = { scope.launch { refresh() } },
+                        onRefresh = { scope.launch { refresh(userInitiated = true) } },
                         onOpenSettings = { settingsOpen = true },
                         onCommand = { mac, outlet, on -> command(mac, outlet, on) },
                     )
@@ -280,6 +282,7 @@ fun PowerkApp(initialTab: Int = 0, navigationRequest: Int = 0) {
             visible = showSplash,
             exit = fadeOut(tween(420)) + scaleOut(tween(420), targetScale = 1.06f),
         ) { Splash() }
+        if (!showSplash) DevicePushPermissionPrompt(Server.connection)
     }
 }
 
@@ -347,10 +350,27 @@ fun PlugsScreen(
     onOpenSettings: () -> Unit,
     onCommand: (String, Int, Boolean) -> Unit,
 ) {
-    val strips = snapshot?.strips.orEmpty()
+    val strips = remember(snapshot?.strips) { snapshot?.strips.orEmpty() }
+    PlugsContent(strips, snapshot != null, snapshot?.currency.orEmpty(), error, loading,
+        pending, onRefresh, onOpenSettings, onCommand)
+}
+
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+private fun PlugsContent(
+    strips: List<Strip>, hasSnapshot: Boolean, currency: String, error: String?, loading: Boolean,
+    pending: Map<String, Boolean>, onRefresh: () -> Unit, onOpenSettings: () -> Unit,
+    onCommand: (String, Int, Boolean) -> Unit,
+) {
+    var claimOpen by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(false) }
+    var managing by remember { mutableStateOf<String?>(null) }
+    if (claimOpen) AccountDialog(R.string.add_strip, { claimOpen = false }) { ClaimScreen(onRefresh) }
+    strips.firstOrNull { it.mac == managing }?.let { strip ->
+        key(strip.mac, strip.role) { StripManagementSheet(strip, { managing = null }, onRefresh) }
+    }
     var renameTarget by remember { mutableStateOf<Pair<Strip, Int>?>(null) }
     renameTarget?.let { (strip, n) ->
-        RenameDialog(strip, n, onDismiss = { renameTarget = null }, onSaved = onRefresh)
+        if (strips.any { it.mac == strip.mac && it.role.canControl }) RenameDialog(strip, n, onDismiss = { renameTarget = null }, onSaved = onRefresh)
     }
 
     LazyColumn(
@@ -358,7 +378,11 @@ fun PlugsScreen(
         contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 20.dp, bottom = 36.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        if (loading || strips.isEmpty()) item {
+        if (!Server.legacy && strips.isNotEmpty()) item {
+            OutlinedButton(onClick = { claimOpen = true }, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.add_strip)) }
+        }
+        // Shown only for an empty list; toggling it with every poll would push the whole list down and back up.
+        if (strips.isEmpty()) item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                 IconButton(onClick = onRefresh, enabled = Server.configured && !loading) {
                     Icon(Icons.Filled.Refresh, stringResource(R.string.refresh))
@@ -387,27 +411,33 @@ fun PlugsScreen(
             }
         } else {
             items(strips, key = { it.mac }) { strip ->
+                val currentStrip by rememberUpdatedState(strip)
+                val rename: (Int) -> Unit = remember { { n -> renameTarget = currentStrip to n } }
+                val manage: (() -> Unit)? = remember(strip.mac, Server.legacy) {
+                    if (Server.legacy) null else ({ managing = strip.mac })
+                }
                 StripCard(
                     strip = strip,
                     showMac = strips.size > 1,
-                    currency = snapshot?.currency.orEmpty(),
+                    currency = strip.currency.ifBlank { currency },
                     pending = pending,
                     onCommand = onCommand,
-                    onRename = { n -> renameTarget = strip to n },
+                    onRename = rename,
+                    onManage = manage,
                     modifier = Modifier.animateItem(),
                 )
             }
 
-            if (snapshot != null && strips.isEmpty()) {
+            if (hasSnapshot && strips.isEmpty()) {
                 item {
-                    EmptyState(
+                    if (!Server.legacy) AddStripEmpty { claimOpen = true } else EmptyState(
                         title = stringResource(R.string.no_strip_title),
                         body = stringResource(R.string.no_strip_body),
                     )
                 }
             }
 
-            if (snapshot == null && error == null) {
+            if (!hasSnapshot && error == null) {
                 item {
                     Column(
                         Modifier.fillMaxWidth().padding(top = 60.dp),
@@ -468,24 +498,34 @@ private fun Header(
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-private fun StripCard(
+internal fun StripCard(
     strip: Strip,
     showMac: Boolean,
     currency: String,
     pending: Map<String, Boolean>,
     onCommand: (String, Int, Boolean) -> Unit,
     onRename: (Int) -> Unit,
+    onManage: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
-    val stateOf: (Int) -> Boolean = { n -> pending["${strip.mac}:$n"] ?: strip.outletOn(n) }
-    val allPending = (1..4).any { pending.containsKey("${strip.mac}:$it") }
+    val mac = strip.mac
+    // A tap on another strip should not invalidate this strip's content.
+    val pendingOutlets by remember(mac, pending) {
+        derivedStateOf(structuralEqualityPolicy()) { (1..4).map { pending["$mac:$it"] } }
+    }
+    val allPending = pendingOutlets.any { it != null }
     val c = LocalPowerkColors.current
     val still = reducedMotion()
     Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.weight(1f)) { HighlightTitle(strip.displayName) }
-                IconButton(onClick = { onRename(0) }) { Icon(Icons.Filled.Edit, stringResource(R.string.rename)) }
+                if (strip.role.canControl) IconButton(onClick = { onRename(0) }) { Icon(Icons.Filled.Edit, stringResource(R.string.rename)) }
                 StatusChip(strip.online)
+            }
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                RoleBadge(strip.role)
+                Spacer(Modifier.weight(1f))
+                if (onManage != null) TextButton(onClick = onManage) { Text(stringResource(R.string.manage_strip)) }
             }
             AlarmChips(strip.alarms)
             Box(Modifier.fillMaxWidth().padding(top = 8.dp).rotate(if (still) 0f else -.4f)) {
@@ -522,25 +562,29 @@ private fun StripCard(
                         if (outlet == null) {
                             Spacer(Modifier.weight(1f))
                         } else {
-                            OutletTile(
-                                outlet = outlet,
-                                on = stateOf(outlet.n),
-                                pending = pending.containsKey("${strip.mac}:${outlet.n}"),
-                                enabled = strip.online,
-                                onToggle = { onCommand(strip.mac, outlet.n, it) },
-                                onRename = { onRename(outlet.n) },
-                                modifier = Modifier.weight(1f),
-                            )
+                            val n = outlet.n
+                            key(n) {
+                                OutletTile(
+                                    outlet = outlet,
+                                    on = pendingOutlets[n - 1] ?: outlet.on,
+                                    pending = pendingOutlets[n - 1] != null,
+                                    enabled = strip.online,
+                                    controllable = strip.role.canControl,
+                                    onToggle = { onCommand(mac, n, it) },
+                                    onRename = { onRename(n) },
+                                    modifier = Modifier.weight(1f),
+                                )
+                            }
                         }
                     }
                 }
             }
 
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Button(onClick = { onCommand(strip.mac, 0, true) }, enabled = strip.online && !allPending,
+                Button(onClick = { onCommand(strip.mac, 0, true) }, enabled = strip.online && strip.role.canControl && !allPending,
                     shape = Wobble2, border = BorderStroke(2.dp, c.ink), colors = ButtonDefaults.buttonColors(containerColor = c.ink, contentColor = c.bg),
                     modifier = Modifier.weight(1f).heightIn(min = 52.dp)) { Text(stringResource(R.string.turn_all_on)) }
-                OutlinedButton(onClick = { onCommand(strip.mac, 0, false) }, enabled = strip.online && !allPending,
+                OutlinedButton(onClick = { onCommand(strip.mac, 0, false) }, enabled = strip.online && strip.role.canControl && !allPending,
                     shape = Wobble2, border = BorderStroke(2.dp, c.ink), colors = ButtonDefaults.outlinedButtonColors(contentColor = c.ink),
                     modifier = Modifier.weight(1f).heightIn(min = 52.dp)) { Text(stringResource(R.string.turn_all_off)) }
             }
@@ -554,6 +598,7 @@ private fun OutletTile(
     on: Boolean,
     pending: Boolean,
     enabled: Boolean,
+    controllable: Boolean,
     onToggle: (Boolean) -> Unit,
     onRename: () -> Unit,
     modifier: Modifier = Modifier,
@@ -576,13 +621,17 @@ private fun OutletTile(
             haptics.performHapticFeedback(HapticFeedbackType.LongPress)
             onToggle(!on)
         },
-        enabled = enabled && !pending,
+        enabled = enabled && controllable && !pending,
         shape = Wobble2,
         border = BorderStroke(2.dp, c.ink),
         color = container,
         contentColor = content,
         modifier = modifier
             .heightIn(min = 164.dp)
+            .semantics {
+                role = Role.Switch
+                toggleableState = if (on) ToggleableState.On else ToggleableState.Off
+            }
             .rotate(if (still) 0f else if (outlet.n % 2 == 1) -.7f else .6f),
     ) {
         Column(
@@ -609,9 +658,9 @@ private fun OutletTile(
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.weight(1f)) {
                     if (pending) CircularWavyProgressIndicator(Modifier.size(22.dp), color = content)
-                    else MiniSwitch(progress = progress, onColor = c.switchOn)
+                    else MiniSwitch(progress = progress, onColor = c.switchOn, enabled = enabled && controllable)
                 }
-                IconButton(onClick = onRename, modifier = Modifier.size(48.dp)) {
+                if (controllable) IconButton(onClick = onRename, modifier = Modifier.size(48.dp)) {
                     Icon(Icons.Filled.Edit, stringResource(R.string.rename), tint = content, modifier = Modifier.size(18.dp))
                 }
             }
@@ -621,10 +670,12 @@ private fun OutletTile(
 
 /** Small animated switch drawn inside an outlet tile: track + sliding thumb. */
 @Composable
-private fun MiniSwitch(progress: Float, onColor: Color) {
+private fun MiniSwitch(progress: Float, onColor: Color, enabled: Boolean) {
     val scheme = MaterialTheme.colorScheme
-    val track = lerp(LocalPowerkColors.current.fill, onColor, progress)
-    val thumb = LocalPowerkColors.current.switchThumb
+    // Match Material's disabled controls for both offline strips and read-only access.
+    val track = if (enabled) lerp(LocalPowerkColors.current.fill, onColor, progress)
+        else scheme.onSurface.copy(alpha = .12f)
+    val thumb = if (enabled) LocalPowerkColors.current.switchThumb else scheme.onSurface.copy(alpha = .38f)
 
     Box(
         Modifier
@@ -805,26 +856,23 @@ private fun EmptyState(title: String, body: String, action: String? = null, onAc
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun SettingsScreen(snapshot: Snapshot?, serverSettingsFixture: ServerSettings? = null) {
-    var host by remember { mutableStateOf(Server.host) }
-    var port by remember { mutableStateOf(Server.port.toString()) }
-    var token by remember { mutableStateOf(Server.token) }
-    var status by remember { mutableStateOf<String?>(null) }
-    var statusOk by remember { mutableStateOf(false) }
-    var busy by remember { mutableStateOf(false) }
+    val strips = remember(snapshot?.strips) { snapshot?.strips.orEmpty() }
+    SettingsContent(strips, serverSettingsFixture)
+}
+
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+private fun SettingsContent(strips: List<Strip>, serverSettingsFixture: ServerSettings?) {
     var lang by remember { mutableStateOf(Lang.code) }
-    val scope = rememberCoroutineScope()
     val context = LocalContext.current
-    val resources = LocalResources.current
-
-    fun commit() = Server.save(host, port.apiInt() ?: 8080, token)
-
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(18.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         HighlightTitle(stringResource(R.string.settings_title))
         ThemePicker()
-        snapshot?.strips?.forEach { StripInfoCard(it) }
+        if (!Server.legacy && Server.configured) AccountSection()
+        strips.forEach { strip -> key(strip.mac) { StripInfoCard(strip) } }
 
         PaperCard(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -856,120 +904,12 @@ fun SettingsScreen(snapshot: Snapshot?, serverSettingsFixture: ServerSettings? =
             }
         }
 
-        PaperCard(Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                Text(
-                    markerText(stringResource(R.string.server_title)),
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Text(
-                    stringResource(R.string.server_body),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                // technical values stay left-to-right even in RTL locales
-                CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
-                    OutlinedTextField(
-                        value = host,
-                        textStyle = LocalPowerkType.current.figures,
-                        onValueChange = { host = it },
-                        label = { Text(stringResource(R.string.field_host)) },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        OutlinedTextField(
-                            value = port,
-                            textStyle = LocalPowerkType.current.figures,
-                            onValueChange = { port = it.filter(Char::isDigit).take(5) },
-                            label = { Text(stringResource(R.string.field_port)) },
-                            singleLine = true,
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                            modifier = Modifier.weight(1f),
-                        )
-                        OutlinedTextField(
-                            value = token,
-                            onValueChange = { token = it },
-                            label = { Text(stringResource(R.string.field_token)) },
-                            visualTransformation = PasswordVisualTransformation(),
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                            singleLine = true,
-                            modifier = Modifier.weight(1.4f),
-                        )
-                    }
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Button(
-                        onClick = {
-                            commit()
-                            status = resources.getString(R.string.saved)
-                            statusOk = true
-                        },
-                        modifier = Modifier.weight(1f),
-                    ) { Text(stringResource(R.string.save)) }
-                    FilledTonalButton(
-                        enabled = !busy,
-                        onClick = {
-                            commit()
-                            busy = true
-                            status = null
-                            val connection = Server.connection
-                            scope.launch {
-                                try {
-                                    val snap = connectionResult(connection, { Server.connection }) { Api.snapshot(it.base, it.token) }
-                                        ?: return@launch
-                                    status = resources.getString(
-                                        R.string.connected_summary,
-                                        snap.strips.size,
-                                        snap.strips.count { it.online },
-                                    )
-                                    statusOk = true
-                                } catch (e: Exception) {
-                                    if (e is kotlinx.coroutines.CancellationException) throw e
-                                    if (connection.isCurrent(Server.connection)) {
-                                        status = uiError(resources, e)
-                                        statusOk = false
-                                    }
-                                } finally {
-                                    busy = false
-                                }
-                            }
-                        },
-                        modifier = Modifier.weight(1f),
-                    ) { Text(stringResource(R.string.test)) }
-                }
-                if (busy) CircularWavyProgressIndicator(Modifier.fillMaxWidth())
-                AnimatedVisibility(visible = status != null, enter = fadeIn(), exit = fadeOut()) {
-                    Surface(
-                        shape = MaterialTheme.shapes.medium,
-                        color = if (statusOk) MaterialTheme.colorScheme.primaryContainer
-                        else MaterialTheme.colorScheme.errorContainer,
-                        contentColor = if (statusOk) MaterialTheme.colorScheme.onPrimaryContainer
-                        else MaterialTheme.colorScheme.onErrorContainer,
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Text(status ?: "", Modifier.padding(14.dp), style = MaterialTheme.typography.bodyMedium)
-                    }
-                }
-                OutlinedButton(
-                    onClick = {
-                        commit()
-                        context.startActivity(
-                            android.content.Intent(
-                                android.content.Intent.ACTION_VIEW,
-                                android.net.Uri.parse(Server.base),
-                            )
-                        )
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                    enabled = Server.configured,
-                ) { Text(stringResource(R.string.open_web_ui)) }
-            }
+        ConnectionSection()
+        if (Server.legacy) ServerSettingsSection(serverSettingsFixture)
+        if (Server.configured) {
+            NotificationSection(strips)
         }
-
-        ServerSettingsSection(serverSettingsFixture)
-        TileTargetSection(snapshot)
+        if (Server.configured) TileTargetSection(strips)
 
         PaperCard(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {

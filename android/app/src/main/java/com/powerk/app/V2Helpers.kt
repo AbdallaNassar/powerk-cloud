@@ -39,8 +39,33 @@ fun uiError(context: Context, error: Exception) = uiError(context.resources, err
 fun uiError(resources: Resources, error: Exception): String {
     if (error is kotlinx.coroutines.CancellationException) throw error
     if (error is ServerException && error.messageRes != null) return resources.getString(error.messageRes)
-    return if (error is ServerException && error.status == 404) resources.getString(R.string.update_server)
-    else error.message ?: resources.getString(R.string.command_failed)
+    if (error is ServerException) {
+        val res = when (error.message) {
+            "wrong phone or password" -> R.string.auth_wrong_credentials
+            "invalid phone number" -> R.string.auth_invalid_phone
+            "phone already registered" -> R.string.auth_phone_exists
+            "registration is closed" -> R.string.auth_registration_closed
+            "password must be 1-128 characters", "password must be 10-128 characters",
+            "password is too common or matches phone" -> R.string.password_rules
+            "claim already pending" -> R.string.claim_already_pending
+            "no unclaimed online strip with this code" -> R.string.claim_not_found
+            "unknown claim" -> R.string.claim_expired
+            "unknown strip" -> R.string.no_access
+            else -> when (error.status) {
+                401 -> if (Server.legacy) R.string.legacy_token_invalid else R.string.auth_sign_in_again
+                403 -> R.string.access_forbidden
+                404 -> R.string.update_server
+                410 -> R.string.account_settings_moved
+                429 -> R.string.rate_limited
+                503 -> R.string.state_offline
+                502 -> R.string.not_confirmed
+                400 -> R.string.request_invalid
+                else -> R.string.command_failed
+            }
+        }
+        return resources.getString(res)
+    }
+    return resources.getString(R.string.connection_failed)
 }
 
 /** Translation injected so formatting remains pure and JVM-testable. */

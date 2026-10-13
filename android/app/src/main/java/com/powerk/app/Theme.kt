@@ -128,8 +128,13 @@ fun PowerkTheme(choice: ThemeChoice? = null, dark: Boolean = isSystemInDarkTheme
         onDispose { p.unregisterOnSharedPreferenceChangeListener(listener) }
     }
     val selected = choice ?: stored
-    val colors = powerkColors(selected, dark)
-    val type = powerkType(LocalConfiguration.current.locales[0].language == "ar")
+    val colors = remember(selected, dark) { powerkColors(selected, dark) }
+    val arabic = LocalConfiguration.current.locales[0].language == "ar"
+    val type = remember(arabic) { powerkType(arabic) }
+    val scheme = remember(colors) { colors.scheme() }
+    val typography = remember(type) { type.typography() }
+    val shapes = remember { Shapes(extraSmall = Wobble2, small = Wobble2, medium = Wobble, large = Wobble, extraLarge = Wobble) }
+    val motion = remember { MotionScheme.expressive() }
     SideEffect {
         context.findActivity()?.let { activity ->
             activity.window.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(colors.bg.toArgb()))
@@ -140,8 +145,7 @@ fun PowerkTheme(choice: ThemeChoice? = null, dark: Boolean = isSystemInDarkTheme
         }
     }
     CompositionLocalProvider(LocalPowerkColors provides colors, LocalPowerkType provides type, LocalThemeChoice provides selected) {
-        MaterialExpressiveTheme(colorScheme = colors.scheme(), typography = type.typography(),
-            shapes = Shapes(extraSmall = Wobble2, small = Wobble2, medium = Wobble, large = Wobble, extraLarge = Wobble),
-            motionScheme = MotionScheme.expressive(), content = content)
+        MaterialExpressiveTheme(colorScheme = scheme, typography = typography,
+            shapes = shapes, motionScheme = motion, content = content)
     }
 }

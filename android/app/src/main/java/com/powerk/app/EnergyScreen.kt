@@ -19,7 +19,14 @@ import kotlinx.coroutines.launch
 
 @Composable
 fun EnergyScreen(snapshot: Snapshot?) {
-    val strips = snapshot?.strips.orEmpty()
+    val strips = remember(snapshot?.strips) { snapshot?.strips.orEmpty() }
+    EnergyContent(strips, snapshot?.utcOffsetSeconds ?: 0, snapshot != null,
+        snapshot?.monthCost ?: 0.0, snapshot?.budget, snapshot?.currency.orEmpty())
+}
+
+@Composable
+private fun EnergyContent(strips: List<Strip>, utcOffsetSeconds: Int, hasSnapshot: Boolean,
+    monthCost: Double, budget: Double?, currency: String) {
     var mac by remember { mutableStateOf(strips.firstOrNull()?.mac.orEmpty()) }
     var range by remember { mutableStateOf("day") }
     var history by remember { mutableStateOf<History?>(null) }
@@ -35,14 +42,15 @@ fun EnergyScreen(snapshot: Snapshot?) {
         loading = true
         fun current() = connection.isCurrent(Server.connection) && mac == requestedMac && range == requestedRange
         try {
-            val result = Api.history(connection.base, connection.token, requestedMac, requestedRange)
+            val result = Api.history(connection, requestedMac, requestedRange)
             if (current()) { history = result; error = null }
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
             if (current()) error = uiError(resources, e)
         } finally { if (current()) loading = false }
     }
-    LaunchedEffect(strips.map { it.mac }) { if (strips.none { it.mac == mac }) mac = strips.firstOrNull()?.mac.orEmpty() }
+    val stripMacs = remember(strips) { strips.map { it.mac } }
+    LaunchedEffect(stripMacs) { if (mac !in stripMacs) mac = stripMacs.firstOrNull().orEmpty() }
     LaunchedEffect(mac, range, Server.connection) { history = null; error = null; loading = false; load() }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(18.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)) {
@@ -66,8 +74,8 @@ fun EnergyScreen(snapshot: Snapshot?) {
                 style = LocalPowerkType.current.figures)
             val barColor = LocalPowerkColors.current.chart
             val baseline = MaterialTheme.colorScheme.outlineVariant
+            val max = remember(h) { h.buckets.maxOfOrNull { it.kwh }?.coerceAtLeast(0.001) ?: 1.0 }
             Canvas(Modifier.fillMaxWidth().height(180.dp).semanticsLabel(resources.getString(R.string.energy_chart))) {
-                val max = h.buckets.maxOfOrNull { it.kwh }?.coerceAtLeast(0.001) ?: 1.0
                 val width = size.width / h.buckets.size.coerceAtLeast(1)
                 drawLine(baseline, Offset(0f, size.height), Offset(size.width, size.height))
                 h.buckets.forEachIndexed { index, bucket ->
@@ -76,34 +84,40 @@ fun EnergyScreen(snapshot: Snapshot?) {
                 }
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                h.buckets.firstOrNull()?.let { Text(serverLocalTime(it.t, snapshot?.utcOffsetSeconds ?: 0,
+                h.buckets.firstOrNull()?.let { Text(serverLocalTime(it.t, utcOffsetSeconds,
                     if (range == "day") "HH:mm" else if (range == "year") "MMM yyyy" else "dd MMM"), style = MaterialTheme.typography.labelSmall) }
-                h.buckets.lastOrNull()?.let { Text(serverLocalTime(it.t, snapshot?.utcOffsetSeconds ?: 0,
+                h.buckets.lastOrNull()?.let { Text(serverLocalTime(it.t, utcOffsetSeconds,
                     if (range == "day") "HH:mm" else if (range == "year") "MMM yyyy" else "dd MMM"), style = MaterialTheme.typography.labelSmall) }
             }
             Text(stringResource(R.string.outlet_breakdown), style = MaterialTheme.typography.titleMedium)
             h.perOutlet.forEach { energy ->
-                DashedDivider()
-                val outlet = strips.find { it.mac == mac }?.outlet(energy.n)
-                Row(Modifier.fillMaxWidth()) {
-                    Text(outlet?.displayName(resources) ?: resources.getString(R.string.outlet_n, energy.n), Modifier.weight(1f))
-                    Text(stringResource(R.string.energy_kwh, energy.kwh.toString()), style = LocalPowerkType.current.figures)
+                key(energy.n) {
+                    DashedDivider()
+                    val outlet = strips.find { it.mac == mac }?.outlet(energy.n)
+                    Row(Modifier.fillMaxWidth()) {
+                        Text(outlet?.displayName(resources) ?: resources.getString(R.string.outlet_n, energy.n), Modifier.weight(1f))
+                        Text(stringResource(R.string.energy_kwh, energy.kwh.toString()), style = LocalPowerkType.current.figures)
+                    }
                 }
             }
         }
-        snapshot?.let { BudgetRing(it) }
+        if (hasSnapshot) {
+            val strip = strips.firstOrNull { it.mac == mac }
+            if (Server.legacy) BudgetRing(monthCost, budget, currency)
+            else if (strip != null) BudgetRing(strip.monthCost, strip.budget, strip.currency)
+        }
     }
 }
 
 @Composable
-private fun BudgetRing(snapshot: Snapshot) {
+private fun BudgetRing(monthCost: Double, budget: Double?, currency: String) {
     Text(stringResource(R.string.monthly_budget), style = MaterialTheme.typography.titleMedium)
-    val pct = budgetPercentage(snapshot.monthCost, snapshot.budget)
+    val pct = budgetPercentage(monthCost, budget)
     if (pct == null) { Text(stringResource(R.string.budget_off)); return }
     val scheme = MaterialTheme.colorScheme
     // A dedicated amber warning role is shared by the ring and warning events.
     val color = when { pct >= 90 -> scheme.error; pct >= 75 -> warningColor(); else -> LocalPowerkColors.current.ok }
-    val label = stringResource(R.string.budget_usage, pct.toInt(), snapshot.monthCost.toString(), snapshot.budget.toString(), snapshot.currency)
+    val label = stringResource(R.string.budget_usage, pct.toInt(), monthCost.toString(), budget.toString(), currency)
     Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
         Box(Modifier.size(180.dp), contentAlignment = Alignment.Center) {
             Canvas(Modifier.fillMaxSize().semanticsLabel(label)) {

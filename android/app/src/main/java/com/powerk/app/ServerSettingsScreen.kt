@@ -41,7 +41,7 @@ fun ServerSettingsSection(fixture: ServerSettings? = null) {
         val connection = Server.connection
         busy = true
         try {
-            val result = connectionResult(connection, { Server.connection }) { Api.settings(it.base, it.token) }
+            val result = connectionResult(connection, { Server.connection }) { Api.settings(it) }
             if (result != null) { bind(result); error = null }
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
@@ -90,11 +90,11 @@ fun ServerSettingsSection(fixture: ServerSettings? = null) {
                     val body = settingsBody(ServerSettings(currency, priceValue!!, budgetValue, tempValue!!, powerValue!!, ntfy, chat), token, clearToken)
                     scope.launch {
                         try {
-                            val saved = connectionResult(connection, { Server.connection }) { Api.saveSettings(it.base, it.token, body) }
+                            val saved = connectionResult(connection, { Server.connection }) { Api.saveSettings(it, body) }
                                 ?: return@launch
                             bind(saved)
                             // Re-read the canonical server values after a change.
-                            val updated = connectionResult(connection, { Server.connection }) { Api.settings(it.base, it.token) }
+                            val updated = connectionResult(connection, { Server.connection }) { Api.settings(it) }
                                 ?: return@launch
                             bind(updated); error = null
                             status = resources.getString(R.string.saved)
@@ -109,7 +109,7 @@ fun ServerSettingsSection(fixture: ServerSettings? = null) {
                     val connection = Server.connection
                     scope.launch {
                         try {
-                            val result = connectionResult(connection, { Server.connection }) { Api.testAlerts(it.base, it.token) }
+                            val result = connectionResult(connection, { Server.connection }) { Api.testAlerts(it) }
                                 ?: return@launch
                             status = if (!result.ok && result.sent.isEmpty() && result.failed.isEmpty())
                                 resources.getString(R.string.no_push_channels)
@@ -131,6 +131,12 @@ fun ServerSettingsSection(fixture: ServerSettings? = null) {
 
 @Composable
 fun TileTargetSection(snapshot: Snapshot?) {
+    val strips = remember(snapshot?.strips) { snapshot?.strips.orEmpty() }
+    TileTargetSection(strips)
+}
+
+@Composable
+fun TileTargetSection(strips: List<Strip>) {
     val context = LocalContext.current
     var target by remember { mutableStateOf(TargetPrefs.tile(context)) }
     var choosing by remember { mutableStateOf(false) }
@@ -146,7 +152,7 @@ fun TileTargetSection(snapshot: Snapshot?) {
         }
     }
     if (choosing) AlertDialog(onDismissRequest = { choosing = false }, title = { Text(stringResource(R.string.choose_outlet)) },
-        text = { TargetList(snapshot?.strips.orEmpty()) {
+        text = { TargetList(strips) {
             TargetPrefs.setTile(context, it); target = it; choosing = false
             TileService.requestListeningState(context, ComponentName(context, OutletTileService::class.java))
         } }, confirmButton = { TextButton(onClick = { choosing = false }) { Text(stringResource(R.string.cancel)) } })

@@ -66,23 +66,25 @@ open class PowerkWidget : AppWidgetProvider() {
         if (!WidgetUpdates.pending.add(key)) return
         WidgetUpdates.renderAll(context)
         val result = goAsync()
+        val connection = Server.connection
         WidgetUpdates.scope.launch {
             var message: String? = null
-            val connection = Server.connection
             try {
-                val outcome = OutletControl.toggle(target)
+                val outcome = OutletControl.toggle(target, connection)
                 if (outcome != null && connection.isCurrent(Server.connection)) {
                     WidgetUpdates.freshSnapshot(context, outcome.snapshot, connection)
                     if (!outcome.confirmed) message = context.localized().getString(R.string.not_confirmed)
                 }
-            } catch (_: Exception) {
+            } catch (e: Exception) {
                 // Never retry an unknown outcome; the next scheduled update is read-only.
-                WidgetUpdates.clearSnapshot()
-                message = context.localized().getString(R.string.not_confirmed)
+                if (connection.isCurrent(Server.connection)) {
+                    WidgetUpdates.clearSnapshot()
+                    message = uiError(context.localized(), e)
+                }
             } finally {
                 WidgetUpdates.pending.remove(key)
                 WidgetUpdates.renderAll(context)
-                if (message != null) WidgetUpdates.render(context, this@PowerkWidget.javaClass, id, message)
+                if (message != null && connection.isCurrent(Server.connection)) WidgetUpdates.render(context, this@PowerkWidget.javaClass, id, message)
                 result.finish()
             }
         }
@@ -106,13 +108,14 @@ object WidgetUpdates {
     suspend fun refresh(context: Context) {
         val connection = Server.connection
         try { freshSnapshot(context, OutletControl.fresh(), connection) }
-        catch (_: Exception) {
-            if (connection.isCurrent(Server.connection)) { cached = null; renderAll(context) }
+        catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            if (connection.isCurrent(Server.connection)) { cached = null; renderAll(context, uiError(context.localized(), e)) }
         }
     }
-    fun renderAll(context: Context) {
+    fun renderAll(context: Context, message: String? = null) {
         val manager = AppWidgetManager.getInstance(context)
-        providers.forEach { provider -> manager.getAppWidgetIds(ComponentName(context, provider)).forEach { render(context, provider, it) } }
+        providers.forEach { provider -> manager.getAppWidgetIds(ComponentName(context, provider)).forEach { render(context, provider, it, message) } }
     }
     fun render(context: Context, provider: Class<out AppWidgetProvider>, id: Int, message: String? = null) {
         val manager = AppWidgetManager.getInstance(context)
@@ -192,7 +195,8 @@ fun outletViews(context: Context, id: Int, snapshot: Snapshot?, c: PowerkColors 
     val local = context.localized()
     val target = TargetPrefs.widget(context, id)
     val resolved = target?.let { snapshot?.resolve(it) }
-    val online = resolved?.first?.online == true
+    val noAccess = target != null && snapshot != null && (resolved == null || !resolved.first.role.canControl)
+    val online = resolved?.first?.online == true && !noAccess
     val on = online && resolved?.second?.on == true
     val switching = target != null && "${target.mac}:${target.n}" in WidgetUpdates.pending
     return RemoteViews(context.packageName, if (compact) R.layout.outlet_widget_compact else R.layout.outlet_widget).apply {
@@ -206,12 +210,14 @@ fun outletViews(context: Context, id: Int, snapshot: Snapshot?, c: PowerkColors 
         setTextViewText(R.id.widget_name, widgetMarker(local, resolved?.second?.displayName(local) ?: target?.name?.ifBlank {
             local.widgetString(R.string.outlet_n, target.n) } ?: local.getString(R.string.choose_outlet)))
         setTextViewText(R.id.widget_state, message ?: if (switching) local.getString(R.string.switching)
+            else if (noAccess) local.getString(R.string.no_access)
+            else if (!Server.configured && snapshot == null) local.getString(R.string.auth_sign_in_again)
             else if (!online) local.getString(R.string.state_offline)
             else if (compact) isolateFigures("${decimal(resolved!!.second.powerW, 1)} W") else if (on)
                 local.onWatts(resolved!!.second.powerW) else local.getString(R.string.state_off))
         val action = if (target == null) PendingIntent.getActivity(context, id, Intent(context, WidgetConfigActivity::class.java)
             .putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, id), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-            else toggleIntent(context, OutletWidget::class.java, id, target.n)
+            else if (noAccess || !Server.configured && snapshot == null) openApp(context, id) else toggleIntent(context, OutletWidget::class.java, id, target.n)
         setOnClickPendingIntent(R.id.widget_root, action)
         setContentDescription(R.id.widget_root, local.getString(R.string.outlet_widget_description))
     }
@@ -224,10 +230,11 @@ fun stripViews(context: Context, id: Int, snapshot: Snapshot?, c: PowerkColors =
     message: String? = null, compact: Boolean = false): RemoteViews {
     val local = context.localized()
     var mac = StripWidgetPrefs.read(context, id)
-    if (mac == null && snapshot?.strips?.size == 1) {
+    if (mac == null && snapshot?.strips?.size == 1 && snapshot.strips.single().role.canControl) {
         mac = snapshot.strips.single().mac; StripWidgetPrefs.save(context, id, mac)
     }
     val strip = snapshot?.strips?.find { it.mac == mac }
+    val noAccess = mac != null && snapshot != null && (strip == null || !strip.role.canControl)
     val layout = if (wide && compact) R.layout.strip_widget_short else if (wide) R.layout.strip_widget else R.layout.strip_widget_narrow
     return RemoteViews(context.packageName, layout).apply {
         paint(context, R.id.widget_root, intArrayOf(R.id.widget_name), intArrayOf(R.id.widget_state), c)
@@ -238,13 +245,13 @@ fun stripViews(context: Context, id: Int, snapshot: Snapshot?, c: PowerkColors =
             setTextViewTextSize(R.id.widget_state, android.util.TypedValue.COMPLEX_UNIT_SP, 9f)
         }
         setTextViewText(R.id.widget_name, widgetMarker(local, strip?.displayName ?: local.getString(R.string.strip_widget_title)))
-        setTextViewText(R.id.widget_state, if (strip?.online == true) "${decimal(strip.powerW, 1)} W" else local.getString(R.string.state_offline))
+        setTextViewText(R.id.widget_state, message ?: if (noAccess) local.getString(R.string.no_access) else if (!Server.configured && snapshot == null) local.getString(R.string.auth_sign_in_again) else if (strip?.online == true) "${decimal(strip.powerW, 1)} W" else local.getString(R.string.state_offline))
         setOnClickPendingIntent(R.id.strip_header, if (mac == null) PendingIntent.getActivity(context, id,
             Intent(context, StripWidgetConfigActivity::class.java).putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, id),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE) else openApp(context, id))
         (1..4).forEach { n ->
             val outlet = strip?.outlet(n)
-            val online = strip?.online == true && outlet != null
+            val online = strip?.online == true && outlet != null && !noAccess
             val on = online && outlet?.on == true
             paint(context, cellIds[n - 1], intArrayOf(nameIds[n - 1]), intArrayOf(stateIds[n - 1]), c, on)
             setInt(nameIds[n - 1], "setMaxLines", if (compact) 1 else 2)
@@ -256,11 +263,11 @@ fun stripViews(context: Context, id: Int, snapshot: Snapshot?, c: PowerkColors =
             }
             setTextViewText(nameIds[n - 1], widgetMarker(local, outlet?.displayName(local) ?: local.widgetString(R.string.outlet_n, n)))
             setTextViewText(stateIds[n - 1], if ("$mac:$n" in WidgetUpdates.pending) local.getString(R.string.switching)
-                else message ?: if (!online) local.getString(R.string.state_offline) else if (on)
+                else message ?: if (noAccess) local.getString(R.string.no_access) else if (!Server.configured && snapshot == null) local.getString(R.string.auth_sign_in_again) else if (!online) local.getString(R.string.state_offline) else if (on)
                       local.onWatts(outlet!!.powerW).replace(" W", "\u00A0W")
                     else local.getString(R.string.state_off))
             setContentDescription(cellIds[n - 1], "${outlet?.displayName(local) ?: local.widgetString(R.string.outlet_n, n)} · ${local.getString(R.string.widget_toggle)}")
-            setOnClickPendingIntent(cellIds[n - 1], if (mac != null) toggleIntent(context, StripWidget::class.java, id, n) else openApp(context, id))
+            setOnClickPendingIntent(cellIds[n - 1], if (mac != null && !noAccess && Server.configured) toggleIntent(context, StripWidget::class.java, id, n) else openApp(context, id))
         }
     }
 }
@@ -269,6 +276,11 @@ fun usageViews(context: Context, id: Int, snapshot: Snapshot?, c: PowerkColors =
     compact: Boolean = false, minimum: Boolean = false): RemoteViews {
     val local = context.localized()
     val today = snapshot?.strips?.sumOf { it.todayKwh } ?: 0.0
+    val currencies = snapshot?.strips.orEmpty().map { it.currency.ifBlank { snapshot?.currency.orEmpty() } }.distinct()
+    val mixed = currencies.size > 1
+    val todayCost = snapshot?.let { snap ->
+        snap.strips.sumOf { it.todayKwh * (if (it.currency.isBlank()) snap.priceKwh else it.priceKwh) }
+    } ?: 0.0
     val online = snapshot != null && snapshot.strips.isNotEmpty() && snapshot.strips.all { it.online }
     return RemoteViews(context.packageName, if (wide) R.layout.usage_widget_wide else R.layout.usage_widget).apply {
         paint(context, R.id.widget_root, intArrayOf(R.id.widget_name, R.id.usage_watts),
@@ -286,11 +298,11 @@ fun usageViews(context: Context, id: Int, snapshot: Snapshot?, c: PowerkColors =
         setTextViewText(R.id.widget_name, widgetMarker(local, local.getString(R.string.usage_widget_title)))
         setTextViewText(R.id.usage_watts, if (online) "${decimal(snapshot!!.strips.sumOf { it.powerW }, 1)} W" else local.getString(R.string.state_offline))
         setTextViewText(R.id.usage_today, "${local.getString(R.string.summary_today)} · ${isolateFigures("${if (snapshot == null) "—" else decimal(today, 2)} kWh")}")
-        setTextViewText(R.id.usage_today_cost, local.costString(R.string.widget_today_cost,
-            if (snapshot == null) "—" else decimal(today * snapshot.priceKwh, 1), snapshot?.currency.orEmpty()))
-        setTextViewText(R.id.usage_month_cost, local.costString(R.string.widget_month_cost,
+        setTextViewText(R.id.usage_today_cost, if (mixed) local.getString(R.string.cost_per_strip) else local.costString(R.string.widget_today_cost,
+            if (snapshot == null) "—" else decimal(todayCost, 1), snapshot?.currency.orEmpty()))
+        setTextViewText(R.id.usage_month_cost, if (mixed) local.getString(R.string.cost_per_strip) else local.costString(R.string.widget_month_cost,
             if (snapshot == null) "—" else decimal(snapshot.monthCost, 1), snapshot?.currency.orEmpty()))
-        val pct = snapshot?.let { budgetPercentage(it.monthCost, it.budget) }
+        val pct = snapshot?.takeIf { !mixed && (Server.legacy || it.strips.size == 1) }?.let { budgetPercentage(it.monthCost, it.budget) }
         setViewVisibility(R.id.usage_budget, if (pct == null) View.GONE else View.VISIBLE)
         setTextViewText(R.id.usage_budget, pct?.let {
             val value = "${it.toInt()}%"

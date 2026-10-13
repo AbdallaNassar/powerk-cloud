@@ -28,14 +28,14 @@ class V2WireTest {
     }
     @Test fun everyV2MutationUsesCorrectMethodAuthAndJsonBody() = withServer { base, requests ->
         runBlocking {
-            Api.rename(base, "secret", "ABC", 4, "Fridge")
-            Api.createRule(base, "secret", JSONObject().put("kind", "timer"))
-            Api.updateRule(base, "secret", "r_abc", JSONObject().put("enabled", false))
-            Api.saveSettings(base, "secret", JSONObject().put("budget", JSONObject.NULL))
-            Api.readEvents(base, "secret", 4102444800L)
-            Api.testAlerts(base, "secret")
-            assertFalse(Api.setOutlet(base, "secret", "ABC", 4, false))
-            Api.deleteRule(base, "secret", "r_abc")
+            Api.rename(ServerConnection(base, "secret"), "ABC", 4, "Fridge")
+            Api.createRule(ServerConnection(base, "secret"), JSONObject().put("kind", "timer"))
+            Api.updateRule(ServerConnection(base, "secret"), "r_abc", JSONObject().put("enabled", false))
+            Api.saveSettings(ServerConnection(base, "secret"), JSONObject().put("budget", JSONObject.NULL))
+            Api.readEvents(ServerConnection(base, "secret"), 4102444800L)
+            Api.testAlerts(ServerConnection(base, "secret"))
+            assertFalse(Api.setOutlet(ServerConnection(base, "secret"), "ABC", 4, false))
+            Api.deleteRule(ServerConnection(base, "secret"), "r_abc")
         }
         assertEquals(listOf("POST", "POST", "PUT", "PUT", "POST", "POST", "POST", "DELETE"), requests.map { it.method })
         requests.forEach { r ->
@@ -57,13 +57,13 @@ class V2WireTest {
     }
     @Test fun queriesAndOptionalFiltersMatchTheContract() = withServer { base, requests ->
         runBlocking {
-            Api.snapshot(base, "")
-            Api.rules(base, "", "ABC")
-            Api.rules(base, "")
-            Api.history(base, "", "ABC", "week", 4)
-            Api.settings(base, "")
-            Api.events(base, "", 4102444800L)
-            Api.readEvents(base, "")
+            Api.snapshot(ServerConnection(base))
+            Api.rules(ServerConnection(base), "ABC")
+            Api.rules(ServerConnection(base))
+            Api.history(ServerConnection(base), "ABC", "week", 4)
+            Api.settings(ServerConnection(base))
+            Api.events(ServerConnection(base), 4102444800L)
+            Api.readEvents(ServerConnection(base))
         }
         assertEquals("/api/state", requests[0].path)
         assertEquals("mac=ABC", requests[1].query)
@@ -76,19 +76,19 @@ class V2WireTest {
     }
     @Test fun actual400ResponsePreservesServerValidationMessage() = withServer(400, """{"error":"minutes must be 1..10080"}""") { base, _ ->
         runBlocking {
-            try { Api.createRule(base, "", JSONObject()); fail("expected 400") }
+            try { Api.createRule(ServerConnection(base), JSONObject()); fail("expected 400") }
             catch (e: ServerException) { assertEquals(400, e.status); assertEquals("minutes must be 1..10080", e.message) }
         }
     }
     @Test fun missingV1EndpointsPreserve404ForFriendlyUpdateMessage() = withServer(404, """{"error":"unknown path"}""") { base, _ ->
         runBlocking {
-            try { Api.rules(base, ""); fail("expected 404") }
+            try { Api.rules(ServerConnection(base)); fail("expected 404") }
             catch (e: ServerException) { assertEquals(404, e.status) }
         }
     }
     @Test fun failedUnknownCommandIsNeverRetried() = withServer(502, """{"error":"outcome unknown"}""") { base, requests ->
         runBlocking {
-            try { Api.setOutlet(base, "", "ABC", 4, true); fail("expected 502") }
+            try { Api.setOutlet(ServerConnection(base), "ABC", 4, true); fail("expected 502") }
             catch (e: ServerException) { assertEquals(502, e.status) }
         }
         assertEquals(1, requests.size)

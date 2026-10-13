@@ -22,11 +22,13 @@ class OutletTileService : TileService() {
         if (busy) return
         refreshJob?.cancel()
         refreshJob = scope.launch {
+            var error: String? = null
             val snapshot = try { OutletControl.fresh() } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
+                error = uiError(localized(), e)
                 null
             }
-            render(snapshot)
+            render(snapshot, error)
         }
     }
     override fun onStopListening() {
@@ -44,13 +46,14 @@ class OutletTileService : TileService() {
         if (busy) return
         busy = true
         refreshJob?.cancel()
+        val connection = Server.connection
         scope.launch {
             try {
-                val result = OutletControl.toggle(target)
+                val result = OutletControl.toggle(target, connection)
                 if (result != null) render(result.snapshot, if (result.confirmed) null else localized().getString(R.string.not_confirmed))
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
-                render(null, localized().getString(R.string.not_confirmed))
+                render(null, uiError(localized(), e))
             }
             finally { busy = false }
         }
@@ -60,15 +63,18 @@ class OutletTileService : TileService() {
         val local = localized()
         val target = TargetPrefs.tile(this)
         val resolved = target?.let { snapshot?.resolve(it) }
+        val noAccess = target != null && snapshot != null && (resolved == null || !resolved.first.role.canControl)
         tile.label = resolved?.second?.displayName(local) ?: target?.name ?: local.getString(R.string.tile_title)
         tile.state = when {
             target == null -> Tile.STATE_INACTIVE // Keep an unconfigured tile tappable to open the app.
+            noAccess -> Tile.STATE_UNAVAILABLE
             resolved?.first?.online != true -> Tile.STATE_UNAVAILABLE
             resolved.second.on -> Tile.STATE_ACTIVE
             else -> Tile.STATE_INACTIVE
         }
         val status = message ?: local.getString(when {
             target == null -> R.string.target_not_set
+            noAccess -> R.string.no_access
             resolved?.first?.online != true -> R.string.state_offline
             resolved.second.on -> R.string.state_on
             else -> R.string.state_off

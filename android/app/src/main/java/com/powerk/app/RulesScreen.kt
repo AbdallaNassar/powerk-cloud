@@ -23,6 +23,12 @@ import org.json.JSONObject
 
 @Composable
 fun RulesScreen(snapshot: Snapshot?) {
+    val strips = remember(snapshot?.strips) { snapshot?.strips.orEmpty() }
+    RulesContent(strips, snapshot?.utcOffsetSeconds ?: 0)
+}
+
+@Composable
+private fun RulesContent(strips: List<Strip>, utcOffsetSeconds: Int) {
     var rules by remember { mutableStateOf<List<Rule>>(emptyList()) }
     var error by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
@@ -31,11 +37,15 @@ fun RulesScreen(snapshot: Snapshot?) {
     var deleting by remember { mutableStateOf<Rule?>(null) }
     val resources = LocalResources.current
     val scope = rememberCoroutineScope()
+    val controllable = remember(strips) { strips.filter { it.role.canControl } }
+    val visibleMacs = remember(strips) { strips.map { it.mac }.toSet() }
+    val groupedRules = remember(rules, visibleMacs) { rules.filter { it.mac in visibleMacs }.groupBy { it.mac } }
+    val stripsByMac = remember(strips) { strips.distinctBy { it.mac }.associateBy { it.mac } }
     suspend fun load() {
         if (!Server.configured) { error = resources.getString(R.string.no_server_title); return }
         val connection = Server.connection
         try {
-            val result = connectionResult(connection, { Server.connection }) { Api.rules(it.base, it.token) }
+            val result = connectionResult(connection, { Server.connection }) { Api.rules(it) }
             if (result != null) { rules = result; error = null }
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
@@ -43,11 +53,15 @@ fun RulesScreen(snapshot: Snapshot?) {
         }
     }
     LaunchedEffect(Server.connection) { rules = emptyList(); error = null; load() }
-    fun change(action: suspend () -> Unit) {
+    fun change(action: suspend (ServerConnection) -> Unit) {
         busy = true
+        val connection = Server.connection
         scope.launch {
-            try { action(); load() } catch (e: Exception) { error = uiError(resources, e) }
-            finally { busy = false }
+            try { action(connection); if (connection.isCurrent(Server.connection)) load() }
+            catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                if (connection.isCurrent(Server.connection)) error = uiError(resources, e)
+            } finally { if (connection.isCurrent(Server.connection)) busy = false }
         }
     }
     Box(Modifier.fillMaxSize()) {
@@ -60,28 +74,28 @@ fun RulesScreen(snapshot: Snapshot?) {
                 error?.let { ErrorBanner(it) }
             }
             if (rules.isEmpty() && error == null) item { Text(stringResource(R.string.no_rules)) }
-            rules.groupBy { it.mac }.forEach { (mac, group) ->
-                val strip = snapshot?.strips?.find { it.mac == mac }
-                item { Text(markerText(strip?.displayName ?: mac), style = MaterialTheme.typography.titleLarge) }
-                items(group, key = { it.id }) { rule ->
+            groupedRules.forEach { (mac, group) ->
+                val strip = stripsByMac[mac]
+                item(key = "strip:$mac") { Text(markerText(strip?.displayName ?: mac), style = MaterialTheme.typography.titleLarge) }
+                items(group, key = { "rule:${it.id}" }) { rule ->
                     PaperCard(Modifier.fillMaxWidth()) {
                         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text(markerText(rule.label.ifBlank { resources.getString(kindString(rule.kind)) }), Modifier.weight(1f),
                                     style = MaterialTheme.typography.titleMedium)
-                                Switch(rule.enabled, enabled = !busy, onCheckedChange = { enabled ->
-                                    change { Api.updateRule(Server.base, Server.token, rule.id, JSONObject().put("enabled", enabled)) }
+                                Switch(rule.enabled, enabled = !busy && strip?.role?.canControl == true, onCheckedChange = { enabled ->
+                                    change { Api.updateRule(it, rule.id, JSONObject().put("enabled", enabled)) }
                                  }, colors = paperSwitchColors(), modifier = Modifier.semanticsLabel(resources.getString(R.string.rule_enabled)))
                             }
-                            Text(resources.describe(rule, strip, snapshot?.utcOffsetSeconds ?: 0))
+                            Text(resources.describe(rule, strip, utcOffsetSeconds))
                             DashedDivider()
                             rule.nextAt?.let { Text(stringResource(R.string.next_action,
-                                serverLocalTime(it, snapshot?.utcOffsetSeconds ?: 0)), style = MaterialTheme.typography.bodySmall) }
+                                serverLocalTime(it, utcOffsetSeconds)), style = MaterialTheme.typography.bodySmall) }
                             Row {
-                                IconButton(enabled = !busy, onClick = { selected = rule; editing = true }) {
+                                IconButton(enabled = !busy && strip?.role?.canControl == true, onClick = { selected = rule; editing = true }) {
                                     Icon(Icons.Filled.Edit, stringResource(R.string.edit_rule))
                                 }
-                                IconButton(enabled = !busy, onClick = { deleting = rule }) {
+                                IconButton(enabled = !busy && strip?.role?.canControl == true, onClick = { deleting = rule }) {
                                     Icon(Icons.Filled.Delete, stringResource(R.string.delete_rule))
                                 }
                             }
@@ -90,17 +104,17 @@ fun RulesScreen(snapshot: Snapshot?) {
                 }
             }
         }
-        FloatingActionButton(onClick = { selected = null; editing = true },
+        if (controllable.isNotEmpty()) FloatingActionButton(onClick = { selected = null; editing = true },
             modifier = Modifier.align(Alignment.BottomEnd).padding(20.dp)) {
             Icon(Icons.Filled.Add, stringResource(R.string.add_rule))
         }
     }
-    if (editing) RuleEditor(snapshot?.strips.orEmpty(), selected,
+    if (editing && (selected == null || controllable.any { it.mac == selected?.mac })) RuleEditor(controllable, selected,
         onDismiss = { editing = false }, onSaved = { scope.launch { load() } })
     deleting?.let { rule ->
         AlertDialog(onDismissRequest = { deleting = null }, title = { Text(stringResource(R.string.delete_rule)) },
             text = { Text(stringResource(R.string.delete_rule_body)) }, confirmButton = {
-                TextButton(onClick = { deleting = null; change { Api.deleteRule(Server.base, Server.token, rule.id) } }) {
+                TextButton(onClick = { deleting = null; change { Api.deleteRule(it, rule.id) } }) {
                     Text(stringResource(R.string.delete_rule))
                 }
             }, dismissButton = { TextButton(onClick = { deleting = null }) { Text(stringResource(R.string.cancel)) } })
@@ -127,8 +141,9 @@ private fun RuleEditor(strips: List<Strip>, existing: Rule?, onDismiss: () -> Un
     val resources = LocalResources.current
     val scope = rememberCoroutineScope()
     val draft = RuleDraft(kind, mac, outlets, label, at, days, on, minutes, onMin, offMin, belowW, forMin)
-    LaunchedEffect(strips.map { it.mac }) {
-        if (existing == null) mac = newRuleMac(mac, strips.map { it.mac })
+    val stripMacs = remember(strips) { strips.map { it.mac } }
+    LaunchedEffect(stripMacs) {
+        if (existing == null) mac = newRuleMac(mac, stripMacs)
     }
     Dialog(onDismissRequest = { if (!busy) onDismiss() }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Surface(Modifier.fillMaxSize().safeDrawingPadding().imePadding(), color = MaterialTheme.colorScheme.background) {
@@ -183,12 +198,16 @@ private fun RuleEditor(strips: List<Strip>, existing: Rule?, onDismiss: () -> Un
                     TextButton(enabled = !busy, onClick = onDismiss) { Text(stringResource(R.string.cancel)) }
                     Button(enabled = !busy && draft.valid(), onClick = {
                         busy = true
+                        val connection = Server.connection
                         scope.launch {
                             try {
-                                if (existing == null) Api.createRule(Server.base, Server.token, draft.body())
-                                else Api.updateRule(Server.base, Server.token, existing.id, draft.body().apply { remove("kind") })
-                                onSaved(); onDismiss()
-                            } catch (e: Exception) { error = uiError(resources, e) }
+                                if (existing == null) Api.createRule(connection, draft.body())
+                                else Api.updateRule(connection, existing.id, draft.body().apply { remove("kind") })
+                                if (connection.isCurrent(Server.connection)) { onSaved(); onDismiss() }
+                            } catch (e: Exception) {
+                                if (e is kotlinx.coroutines.CancellationException) throw e
+                                if (connection.isCurrent(Server.connection)) error = uiError(resources, e)
+                            }
                             finally { busy = false }
                         }
                     }) { Text(stringResource(R.string.save)) }

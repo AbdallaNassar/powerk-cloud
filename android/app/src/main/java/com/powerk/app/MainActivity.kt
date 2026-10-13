@@ -18,7 +18,7 @@ class MainActivity : ComponentActivity() {
         Server.init(this)
         Lang.init(this)
         Lang.applyStored(this)
-        requestedTab = if (intent.getStringExtra(EXTRA_TAB) == "energy") 2 else 0
+        requestedTab = notificationInitialTab(intent)
         setContent {
             PowerkTheme {
                 PowerkApp(requestedTab, navigationRequest)
@@ -28,8 +28,17 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        requestedTab = if (intent.getStringExtra(EXTRA_TAB) == "energy") 2 else 0
+        requestedTab = notificationInitialTab(intent)
         navigationRequest++
+    }
+    override fun onStart() {
+        super.onStart()
+        LiveFeed.started(this, this)
+        PushDevices.connectionChanged()
+    }
+    override fun onStop() {
+        LiveFeed.stopped(this)
+        super.onStop()
     }
     companion object { const val EXTRA_TAB = "com.powerk.app.TAB" }
 }

@@ -22,14 +22,14 @@ class WidgetConfigActivity : ComponentActivity() {
         val id = intent.getIntExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, AppWidgetManager.INVALID_APPWIDGET_ID)
         if (id == AppWidgetManager.INVALID_APPWIDGET_ID) { finish(); return }
         setContent {
-            PowerkTheme {
+            key(Server.connection) { PowerkTheme {
                 var snapshot by remember { mutableStateOf<Snapshot?>(null) }
                 var error by remember { mutableStateOf<String?>(null) }
                 var loading by remember { mutableStateOf(true) }
                 var saving by remember { mutableStateOf(false) }
-                LaunchedEffect(Unit) {
+                LaunchedEffect(Server.connection) {
                     try { snapshot = OutletControl.fresh() }
-                    catch (e: Exception) { error = if (!Server.configured) getString(R.string.no_server_body) else uiError(this@WidgetConfigActivity, e) }
+                    catch (e: Exception) { error = if (!Server.configured) getString(R.string.auth_sign_in_again) else uiError(this@WidgetConfigActivity, e) }
                     finally { loading = false }
                 }
                 Surface(Modifier.fillMaxSize()) {
@@ -52,7 +52,7 @@ class WidgetConfigActivity : ComponentActivity() {
                         TextButton(onClick = { finish() }) { Text(stringResource(R.string.cancel)) }
                     }
                 }
-            }
+            } }
         }
     }
 }

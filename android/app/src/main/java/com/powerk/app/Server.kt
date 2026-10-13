@@ -10,47 +10,98 @@ import android.os.Build
 import android.os.LocaleList
 import androidx.annotation.RequiresApi
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import java.util.Locale
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 
-/** Server address (PC / Raspberry / VPS running powerk.py), persisted in SharedPreferences. */
+/** Observable request identity. Tokens rotate without changing identity; account/server changes do. */
 object Server {
     private var prefs: SharedPreferences? = null
-
-    var host by mutableStateOf("")
+    private var context: Context? = null
+    var connection by mutableStateOf(ServerConnection(DEFAULT_SERVER_URL, legacy = false))
         private set
-    var port by mutableIntStateOf(8080)
-        private set
-    var token by mutableStateOf("")
-        private set
-    private var revision by mutableIntStateOf(0)
 
     fun init(context: Context) {
         if (prefs != null) return
         val p = context.applicationContext.getSharedPreferences("powerk", Context.MODE_PRIVATE)
         prefs = p
-        host = p.getString("host", "").orEmpty()
-        port = p.getInt("port", 8080)
-        token = p.getString("token", "").orEmpty()
+        this.context = context.applicationContext
+        AuthClient.init(context.applicationContext)
+        val oldHost = p.getString("host", "").orEmpty()
+        val migrated = if (oldHost.isBlank()) null else validateServerUrl("http://$oldHost:${p.getInt("port", 8080)}")
+        val savedUrl = validateServerUrl(p.getString("base_url", null).orEmpty())
+        val base = savedUrl?.base ?: migrated?.base ?: DEFAULT_SERVER_URL
+        val canMigrate = savedUrl != null || migrated != null
+        val legacy = canMigrate && p.getBoolean("legacy", oldHost.isNotBlank())
+        val oldToken = p.getString("token", "").orEmpty()
+        // Never move a credential from a rejected old address to the default server.
+        if (!canMigrate) AuthClient.vault.saveLegacy("")
+        else if (oldToken.isNotEmpty()) AuthClient.vault.saveLegacy(oldToken)
+        p.edit().putString("base_url", base).putBoolean("legacy", legacy)
+            .remove("host").remove("port").remove("token").commit()
+        val restore = !legacy && AuthClient.client.canRestore(base)
+        connection = ServerConnection(base, if (legacy) AuthClient.vault.legacyToken() else "",
+            accountId = if (restore) AuthClient.accountId else null, legacy = legacy)
+        if (AuthClient.accountId != null && !restore) AuthClient.clear()
+        else if (!connection.authorized) changed()
     }
 
+    /** Compatibility helper for existing fixtures and LAN setups. */
     fun save(newHost: String, newPort: Int, newToken: String) {
-        if (host != newHost.trim() || port != newPort.coerceIn(1, 65535) || token != newToken.trim()) revision++
-        host = newHost.trim()
-        port = newPort.coerceIn(1, 65535)
-        token = newToken.trim()
-        prefs?.edit()
-            ?.putString("host", host)
-            ?.putInt("port", port)
-            ?.putString("token", token)
-            ?.apply()
+        replaceConnection("http://${newHost.trim()}:${newPort.coerceIn(1, 65535)}", true, newToken)
     }
-
-    val configured: Boolean get() = host.isNotBlank()
-    val base: String get() = "http://$host:$port"
-    val connection: ServerConnection get() = ServerConnection(base, token, revision)
+    suspend fun saveUrl(url: String, legacy: Boolean, sharedToken: String = "") = withContext(NonCancellable + Dispatchers.IO) {
+        val base = requireNotNull(validateServerUrl(url)).base
+        val token = if (legacy) sharedToken.trim() else ""
+        val captured = connection
+        if (captured.base == base && captured.legacy == legacy && captured.token == token) return@withContext
+        PushDevices.beforeSignOut(captured)
+        synchronized(AuthClient.client.stateLock) {
+            // Deleting a push token can discover that the old session was revoked and sign it out.
+            val signedOutDuringCleanup = connection == captured.copy(accountId = null, revision = captured.revision + 1)
+            if (captured.isCurrent(connection) || signedOutDuringCleanup) replaceConnection(base, legacy, token)
+        }
+    }
+    private fun replaceConnection(url: String, legacy: Boolean, sharedToken: String = "") {
+        val validated = requireNotNull(validateServerUrl(url))
+        val token = if (legacy) sharedToken.trim() else ""
+        if (connection.base == validated.base && connection.legacy == legacy && connection.token == token) return
+        synchronized(AuthClient.client.stateLock) {
+            AuthClient.clear()
+            AuthClient.vault.saveLegacy(token)
+            connection = ServerConnection(validated.base, token, connection.revision + 1, legacy = legacy)
+            prefs?.edit()?.putString("base_url", validated.base)?.putBoolean("legacy", legacy)?.commit()
+            changed()
+        }
+    }
+    internal fun accountChanged(id: Long?) {
+        connection = connection.copy(accountId = id, revision = connection.revision + 1)
+        changed()
+    }
+    private fun changed() {
+        LiveFeed.connectionChanged()
+        PushDevices.connectionChanged()
+        WidgetUpdates.clearSnapshot()
+        WidgetUpdates.pending.clear()
+        context?.let { c ->
+            // Saved targets and their names belong to the old account/server.
+            c.getSharedPreferences("targets", Context.MODE_PRIVATE).edit().clear().apply()
+            WidgetUpdates.scope.launch { WidgetUpdates.renderAll(c) }
+            runCatching {
+                android.service.quicksettings.TileService.requestListeningState(c,
+                    android.content.ComponentName(c, OutletTileService::class.java))
+            }
+        }
+    }
+    val configured: Boolean get() = connection.authorized
+    val base: String get() = connection.base
+    val host: String get() = java.net.URI(base).host.orEmpty()
+    val token: String get() = connection.token
+    val legacy: Boolean get() = connection.legacy
 }
 
 /** In-app language: null follows the phone language. */

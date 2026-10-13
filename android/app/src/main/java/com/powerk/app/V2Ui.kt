@@ -48,9 +48,16 @@ fun RenameDialog(strip: Strip, outlet: Int, onDismiss: () -> Unit, onSaved: () -
     }, confirmButton = {
         TextButton(enabled = !busy, onClick = {
             busy = true
+            val connection = Server.connection
             scope.launch {
-                try { Api.rename(Server.base, Server.token, strip.mac, outlet, name); onSaved(); onDismiss() }
-                catch (e: Exception) { error = uiError(resources, e) }
+                try {
+                    Api.rename(connection, strip.mac, outlet, name)
+                    if (connection.isCurrent(Server.connection)) { onSaved(); onDismiss() }
+                }
+                catch (e: Exception) {
+                    if (e is kotlinx.coroutines.CancellationException) throw e
+                    if (connection.isCurrent(Server.connection)) error = uiError(resources, e)
+                }
                 finally { busy = false }
             }
         }) { Text(stringResource(R.string.save)) }
@@ -62,10 +69,12 @@ fun StripPicker(strips: List<Strip>, mac: String, onSelect: (String) -> Unit) {
     if (strips.size > 1) {
         Text(stringResource(R.string.choose_strip), style = MaterialTheme.typography.titleSmall)
         strips.forEach { strip ->
-            Row(Modifier.fillMaxWidth(), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-                RadioButton(selected = strip.mac == mac, onClick = { onSelect(strip.mac) })
-                Text(markerText(strip.displayName), Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
-                Text(strip.mac.takeLast(6), style = LocalPowerkType.current.figures)
+            key(strip.mac) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                    RadioButton(selected = strip.mac == mac, onClick = { onSelect(strip.mac) })
+                    Text(markerText(strip.displayName), Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
+                    Text(strip.mac.takeLast(6), style = LocalPowerkType.current.figures)
+                }
             }
         }
     }
@@ -73,8 +82,9 @@ fun StripPicker(strips: List<Strip>, mac: String, onSelect: (String) -> Unit) {
 
 @Composable
 fun Field(value: String, onValueChange: (String) -> Unit, label: Int,
-    numeric: Boolean = false, secret: Boolean = false) {
+    numeric: Boolean = false, secret: Boolean = false, readOnly: Boolean = false, enabled: Boolean = true) {
      OutlinedTextField(value, onValueChange, label = { Text(stringResource(label)) },
+         readOnly = readOnly, enabled = enabled,
          textStyle = if (numeric || label == R.string.schedule_time || label == R.string.telegram_chat || label == R.string.ntfy_url)
              LocalPowerkType.current.figures else LocalPowerkType.current.body,
         singleLine = true, modifier = Modifier.fillMaxWidth(),

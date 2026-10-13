@@ -26,17 +26,17 @@ class StripWidgetConfigActivity : ComponentActivity() {
             finish()
         }
         setContent {
-            PowerkTheme {
+            key(Server.connection) { PowerkTheme {
                 var snapshot by remember { mutableStateOf<Snapshot?>(null) }
                 var error by remember { mutableStateOf<String?>(null) }
                 var loading by remember { mutableStateOf(true) }
-                LaunchedEffect(Unit) {
+                LaunchedEffect(Server.connection) {
                     try {
                         val connection = Server.connection
                         val fresh = OutletControl.fresh()
-                        snapshot = fresh
+                        snapshot = fresh.copy(strips = fresh.strips.filter { it.role.canControl })
                         WidgetUpdates.freshSnapshot(this@StripWidgetConfigActivity, fresh, connection)
-                        if (fresh.strips.size == 1) choose(fresh.strips.single().mac)
+                        if (snapshot!!.strips.size == 1) choose(snapshot!!.strips.single().mac)
                     } catch (e: Exception) { error = uiError(this@StripWidgetConfigActivity, e) }
                     finally { loading = false }
                 }
@@ -53,7 +53,7 @@ class StripWidgetConfigActivity : ComponentActivity() {
                         TextButton(onClick = { finish() }) { Text(stringResource(R.string.cancel)) }
                     }
                 }
-            }
+            } }
         }
     }
 }
